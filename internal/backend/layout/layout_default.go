@@ -25,6 +25,7 @@ var defaultLayoutPaths = map[backend.FileType]string{
 	backend.IndexFile:    "index",
 	backend.LockFile:     "locks",
 	backend.KeyFile:      "keys",
+	backend.RecoveryFile: "recovery",
 }
 
 func NewDefaultLayout(path string, join func(...string) string) *DefaultLayout {

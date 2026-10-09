@@ -14,4 +14,5 @@ var (
 	_ = [1]struct{}{}[backend.SnapshotFile-backend.FileType(restic.SnapshotFile)]
 	_ = [1]struct{}{}[backend.IndexFile-backend.FileType(restic.IndexFile)]
 	_ = [1]struct{}{}[backend.ConfigFile-backend.FileType(restic.ConfigFile)]
+	_ = [1]struct{}{}[backend.RecoveryFile-backend.FileType(restic.RecoveryFile)]
 )

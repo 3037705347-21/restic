@@ -12,6 +12,7 @@ const (
 	SnapshotFile
 	IndexFile
 	ConfigFile
+	RecoveryFile
 )
 
 // Keep in sync with backend.FileType.String().
@@ -31,6 +32,8 @@ func (t FileType) String() string {
 		s = "index"
 	case ConfigFile:
 		s = "config"
+	case RecoveryFile:
+		s = "recovery"
 	}
 	return s
 }
@@ -41,12 +44,16 @@ type WriteableFileType FileType
 const (
 	// WriteableSnapshotFile is the WriteableFileType for snapshots.
 	WriteableSnapshotFile = WriteableFileType(SnapshotFile)
+	// WriteableRecoveryFile is the WriteableFileType for recovery records.
+	WriteableRecoveryFile = WriteableFileType(RecoveryFile)
 )
 
 func (w *WriteableFileType) ToFileType() FileType {
 	switch *w {
 	case WriteableSnapshotFile:
 		return SnapshotFile
+	case WriteableRecoveryFile:
+		return RecoveryFile
 	default:
 		panic("invalid WriteableFileType")
 	}

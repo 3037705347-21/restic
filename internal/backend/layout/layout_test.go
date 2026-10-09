@@ -110,6 +110,7 @@ func TestDefaultLayout(t *testing.T) {
 			filepath.Join(tempdir, "index"),
 			filepath.Join(tempdir, "locks"),
 			filepath.Join(tempdir, "keys"),
+			filepath.Join(tempdir, "recovery"),
 		}
 
 		for i := range 256 {
@@ -185,6 +186,7 @@ func TestRESTLayout(t *testing.T) {
 			strings.Join([]string{url, "index"}, "/"),
 			strings.Join([]string{url, "locks"}, "/"),
 			strings.Join([]string{url, "keys"}, "/"),
+			strings.Join([]string{url, "recovery"}, "/"),
 		}
 
 		sort.Strings(want)

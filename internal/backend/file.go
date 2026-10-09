@@ -18,6 +18,7 @@ const (
 	SnapshotFile
 	IndexFile
 	ConfigFile
+	RecoveryFile
 )
 
 // Keep in sync with restic.FileType.String().
@@ -37,6 +38,8 @@ func (t FileType) String() string {
 		s = "index"
 	case ConfigFile:
 		s = "config"
+	case RecoveryFile:
+		s = "recovery"
 	}
 	return s
 }
@@ -65,6 +68,7 @@ func (h Handle) Valid() error {
 	case SnapshotFile:
 	case IndexFile:
 	case ConfigFile:
+	case RecoveryFile:
 	default:
 		return errors.Errorf("invalid Type %d", h.Type)
 	}
