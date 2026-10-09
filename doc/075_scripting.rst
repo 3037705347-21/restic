@@ -744,6 +744,32 @@ The ``key list`` command returns an array of objects with the following structur
 +--------------+-----------------------------------+-----------------+
 
 
+key rotate
+----------
+
+The ``key rotate`` command outputs a single object with the following structure.
+
++---------------+------------------------------------------------------+-----------+
+| ``dry_run``   | Was the ``--dry-run`` flag set?                      | bool      |
++---------------+------------------------------------------------------+-----------+
+| ``changed``   | Did the rotation modify the repository?              | bool      |
++---------------+------------------------------------------------------+-----------+
+| ``baseline``  | Was this the first rotation recording the roster?    | bool      |
++---------------+------------------------------------------------------+-----------+
+| ``current``   | ID of the key used to access the repository          | string    |
++---------------+------------------------------------------------------+-----------+
+| ``roster``    | Key IDs listed in the roster                         | []string  |
++---------------+------------------------------------------------------+-----------+
+| ``adopt``     | Roster keys newly recorded as rotation-managed       | []string  |
++---------------+------------------------------------------------------+-----------+
+| ``retire``    | Managed keys planned for removal before applying     | []string  |
++---------------+------------------------------------------------------+-----------+
+| ``removed``   | Key IDs actually removed (absent with ``--dry-run``) | []string  |
++---------------+------------------------------------------------------+-----------+
+| ``untouched`` | Existing keys not managed by a roster rotation       | []string  |
++---------------+------------------------------------------------------+-----------+
+
+
 .. _ls json:
 
 ls

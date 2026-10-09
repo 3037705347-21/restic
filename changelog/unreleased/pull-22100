@@ -1,0 +1,13 @@
+Enhancement: Add `key rotate` command to reconcile repository keys with a member roster
+
+The new `key rotate --roster-file` command manages repository keys based on a
+roster of current member key IDs. Keys listed in the roster are retained,
+keys recorded by a previous rotation that are missing from the roster are
+removed, and keys that were added manually and never appeared in a roster are
+left untouched. The first rotation records a baseline and removes nothing.
+The rotation is applied atomically and rolls back on any write failure, the
+repository remains unlockable with the current key, and re-running the
+command with an unchanged roster does not modify the repository. The
+`--dry-run` flag previews the planned changes.
+
+https://github.com/restic/restic/pull/22100

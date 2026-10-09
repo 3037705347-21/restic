@@ -22,6 +22,7 @@ per repository.
 		newKeyListCommand(globalOptions),
 		newKeyPasswdCommand(globalOptions),
 		newKeyRemoveCommand(globalOptions),
+		newKeyRotateCommand(globalOptions),
 	)
 	return cmd
 }
