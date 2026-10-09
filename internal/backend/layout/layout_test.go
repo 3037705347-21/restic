@@ -59,6 +59,12 @@ func TestDefaultLayout(t *testing.T) {
 			filepath.Join(tempdir, "keys", "123456"),
 		},
 		{
+			tempdir,
+			filepath.Join,
+			backend.Handle{Type: backend.CopyStateFile, Name: "123456"},
+			filepath.Join(tempdir, "copy-state", "123456"),
+		},
+		{
 			"",
 			path.Join,
 			backend.Handle{Type: backend.PackFile, Name: "0123456"},
@@ -94,6 +100,12 @@ func TestDefaultLayout(t *testing.T) {
 			backend.Handle{Type: backend.KeyFile, Name: "123456"},
 			"keys/123456",
 		},
+		{
+			"",
+			path.Join,
+			backend.Handle{Type: backend.CopyStateFile, Name: "123456"},
+			"copy-state/123456",
+		},
 	}
 
 	t.Run("Paths", func(t *testing.T) {
@@ -110,6 +122,7 @@ func TestDefaultLayout(t *testing.T) {
 			filepath.Join(tempdir, "index"),
 			filepath.Join(tempdir, "locks"),
 			filepath.Join(tempdir, "keys"),
+			filepath.Join(tempdir, "copy-state"),
 		}
 
 		for i := range 256 {
@@ -170,6 +183,10 @@ func TestRESTLayout(t *testing.T) {
 			backend.Handle{Type: backend.KeyFile, Name: "123456"},
 			strings.Join([]string{url, "keys", "123456"}, "/"),
 		},
+		{
+			backend.Handle{Type: backend.CopyStateFile, Name: "123456"},
+			strings.Join([]string{url, "copy-state", "123456"}, "/"),
+		},
 	}
 
 	l := &RESTLayout{
@@ -185,6 +202,7 @@ func TestRESTLayout(t *testing.T) {
 			strings.Join([]string{url, "index"}, "/"),
 			strings.Join([]string{url, "locks"}, "/"),
 			strings.Join([]string{url, "keys"}, "/"),
+			strings.Join([]string{url, "copy-state"}, "/"),
 		}
 
 		sort.Strings(want)

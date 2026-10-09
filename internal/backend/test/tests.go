@@ -791,7 +791,7 @@ func delayedList(t testing.TB, b backend.Backend, tpe backend.FileType, max int,
 func (s *Suite[C]) TestBackend(t *testing.T) {
 	for _, tpe := range []backend.FileType{
 		backend.PackFile, backend.KeyFile, backend.LockFile,
-		backend.SnapshotFile, backend.IndexFile,
+		backend.SnapshotFile, backend.IndexFile, backend.CopyStateFile,
 	} {
 		t.Run(tpe.String(), func(t *testing.T) {
 			t.Parallel()

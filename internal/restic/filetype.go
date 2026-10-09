@@ -12,6 +12,9 @@ const (
 	SnapshotFile
 	IndexFile
 	ConfigFile
+	// CopyStateFile stores per-snapshot progress of the `copy` command. New file
+	// types must be appended to keep the numeric values of existing types stable.
+	CopyStateFile
 )
 
 // Keep in sync with backend.FileType.String().
@@ -31,6 +34,8 @@ func (t FileType) String() string {
 		s = "index"
 	case ConfigFile:
 		s = "config"
+	case CopyStateFile:
+		s = "copy-state"
 	}
 	return s
 }
@@ -41,12 +46,16 @@ type WriteableFileType FileType
 const (
 	// WriteableSnapshotFile is the WriteableFileType for snapshots.
 	WriteableSnapshotFile = WriteableFileType(SnapshotFile)
+	// WriteableCopyStateFile is the WriteableFileType for `copy` progress records.
+	WriteableCopyStateFile = WriteableFileType(CopyStateFile)
 )
 
 func (w *WriteableFileType) ToFileType() FileType {
 	switch *w {
 	case WriteableSnapshotFile:
 		return SnapshotFile
+	case WriteableCopyStateFile:
+		return CopyStateFile
 	default:
 		panic("invalid WriteableFileType")
 	}

@@ -17,7 +17,7 @@ import (
 )
 
 func newListCommand(globalOptions *global.Options) *cobra.Command {
-	var listAllowedArgs = []string{"blobs", "packs", "index", "snapshots", "keys", "locks"}
+	var listAllowedArgs = []string{"blobs", "packs", "index", "snapshots", "keys", "locks", "copy-state"}
 	var listAllowedArgsUseString = strings.Join(listAllowedArgs, "|")
 
 	cmd := &cobra.Command{
@@ -76,6 +76,8 @@ func runList(ctx context.Context, gopts global.Options, args []string, term ui.T
 		t = restic.KeyFile
 	case "locks":
 		t = restic.LockFile
+	case "copy-state":
+		t = restic.CopyStateFile
 	case "blobs":
 		for entry := range repository.AllIndexBlobs(ctx, repo, repo) {
 			if entry.Error != nil {

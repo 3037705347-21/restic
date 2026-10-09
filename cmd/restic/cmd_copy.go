@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/restic/restic/internal/copier"
 	"github.com/restic/restic/internal/data"
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/errors"
@@ -39,6 +40,13 @@ This means that copied files, which existed in both the source and destination
 repository, /may occupy up to twice their space/ in the destination repository.
 This can be mitigated by the "--copy-chunker-params" option when initializing a
 new destination repository using the "init" command.
+
+The copy progress is recorded in the destination repository. Each source
+snapshot is only skipped once its copy is complete, and a copy run that is
+interrupted (for example by a network failure) only finishes the snapshots that
+were not completed yet. Snapshots created manually in the destination
+repository are never modified or removed. If the progress records cannot be
+written, the command fails instead of copying without bookkeeping.
 
 EXIT STATUS
 ===========
@@ -74,45 +82,88 @@ func (opts *CopyOptions) AddFlags(f *pflag.FlagSet) {
 
 var errSentinelEndIteration = errors.New("end iteration")
 
-// collectAllSnapshots: select all snapshot trees to be copied
+// snapshotWork is a source snapshot selected for copying together with its
+// persistent identity (the Original ID used when it is copied).
+type snapshotWork struct {
+	sn       *data.Snapshot
+	original restic.ID
+}
+
+// collectAllSnapshots selects the source snapshots that still need copying.
+// The progress ledger stored in the destination repository is authoritative:
+//   - snapshots recorded as complete and still present at the destination are
+//     skipped without reading or transferring their data;
+//   - copies made by older restic versions (recognized via the Original field)
+//     are imported into the ledger and skipped as well;
+//   - everything else is yielded for copying, including snapshots whose data
+//     was already copied before an interrupted run.
 func collectAllSnapshots(ctx context.Context, opts CopyOptions,
 	srcSnapshotLister restic.Lister, srcRepo restic.Repository,
-	dstSnapshotByOriginal map[restic.ID][]*data.Snapshot, args []string, printer restic.Printer,
-) iter.Seq2[*data.Snapshot, error] {
-	return func(yield func(*data.Snapshot, error) bool) {
+	dstSnapshotByOriginal map[restic.ID][]*data.Snapshot,
+	ledger *copier.Ledger, targetSnapshotIDs restic.IDSet,
+	args []string, printer restic.Printer,
+) iter.Seq2[snapshotWork, error] {
+	targetExists := targetSnapshotIDs.Has
+	return func(yield func(snapshotWork, error) bool) {
 		err := opts.SnapshotFilter.FindAll(ctx, srcSnapshotLister, srcRepo, args, func(_ string, sn *data.Snapshot, err error) error {
-			// check whether the destination has a snapshot with the same persistent ID which has similar snapshot fields
 			if err != nil {
-				if !yield(nil, err) {
+				if !yield(snapshotWork{}, err) {
 					return errSentinelEndIteration
 				}
 				return nil
 			}
-			srcOriginal := *sn.ID()
+
+			srcID := *sn.ID()
+			originalID := srcID
 			if sn.Original != nil {
-				srcOriginal = *sn.Original
+				originalID = *sn.Original
 			}
-			if originalSns, ok := dstSnapshotByOriginal[srcOriginal]; ok {
-				isCopy := false
-				for _, originalSn := range originalSns {
-					if similarSnapshots(originalSn, sn) {
-						printer.V("\n%v", sn)
-						printer.V("skipping source snapshot %s, was already copied to snapshot %s", sn.ID().Str(), originalSn.ID().Str())
-						isCopy = true
-						break
-					}
-				}
-				if isCopy {
+
+			// authoritative decision from the destination progress ledger
+			if entry, ok := ledger.Get(srcID); ok {
+				if entry.Stage == copier.StageComplete && entry.TargetID != nil && targetExists(*entry.TargetID) {
+					printer.V("\n%v", sn)
+					printer.V("skipping source snapshot %s, copy already recorded as complete (destination snapshot %s)",
+						srcID.Str(), entry.TargetID.Str())
 					return nil
 				}
+				if entry.Stage == copier.StageComplete {
+					// the copied snapshot vanished from the destination, copy it again
+					printer.V("recorded destination snapshot for source snapshot %s no longer exists, copying again",
+						srcID.Str())
+					ledger.Forget(srcID)
+				}
+				// stage "data-copied": copyTree below skips blobs already present,
+				// only the snapshot metadata still has to be saved
+				if !yield(snapshotWork{sn: sn, original: originalID}, nil) {
+					return errSentinelEndIteration
+				}
+				return nil
 			}
-			if !yield(sn, nil) {
+
+			// compatibility: recognize copies made by restic versions without
+			// a progress ledger and import them as complete
+			if originalSns, ok := dstSnapshotByOriginal[originalID]; ok {
+				for _, existing := range originalSns {
+					if similarSnapshots(existing, sn) {
+						printer.V("\n%v", sn)
+						printer.V("skipping source snapshot %s, was already copied to snapshot %s; recording it in the progress ledger",
+							srcID.Str(), existing.ID().Str())
+						if err := ledger.Mark(srcID, originalID, copier.StageComplete, existing.ID()); err != nil {
+							return err
+						}
+						return nil
+					}
+				}
+			}
+
+			if !yield(snapshotWork{sn: sn, original: originalID}, nil) {
 				return errSentinelEndIteration
 			}
 			return nil
 		})
 		if err != nil && !errors.Is(err, errSentinelEndIteration) {
-			yield(nil, err)
+			yield(snapshotWork{}, err)
 		}
 	}
 }
@@ -160,10 +211,12 @@ func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args [
 	}
 
 	dstSnapshotByOriginal := make(map[restic.ID][]*data.Snapshot)
+	dstSnapshotIDs := restic.NewIDSet()
 	err = opts.SnapshotFilter.FindAll(ctx, dstSnapshotLister, dstRepo, nil, func(_ string, sn *data.Snapshot, err error) error {
 		if err != nil {
 			return err
 		}
+		dstSnapshotIDs.Insert(*sn.ID())
 		if sn.Original != nil && !sn.Original.IsNull() {
 			dstSnapshotByOriginal[*sn.Original] = append(dstSnapshotByOriginal[*sn.Original], sn)
 		}
@@ -175,10 +228,44 @@ func runCopy(ctx context.Context, opts CopyOptions, gopts global.Options, args [
 		return err
 	}
 
-	selectedSnapshots := collectAllSnapshots(ctx, opts, srcSnapshotLister, srcRepo, dstSnapshotByOriginal, args, printer)
+	debug.Log("Loading copy progress ledger")
+	ledger, journalFiles, err := copier.LoadLedger(ctx, dstRepo)
+	if err != nil {
+		return fmt.Errorf("loading copy progress ledger failed: %w", err)
+	}
 
-	if err := copyTreeBatched(ctx, srcRepo, dstRepo, selectedSnapshots, printer); err != nil {
+	selectedSnapshots := collectAllSnapshots(ctx, opts, srcSnapshotLister, srcRepo,
+		dstSnapshotByOriginal, ledger, dstSnapshotIDs, args, printer)
+
+	// persistLedger writes the current in-memory ledger to the destination. A
+	// failure is fatal: copying must not continue when progress cannot be
+	// recorded.
+	persistLedger := func() error {
+		if ledger.Empty() {
+			return nil
+		}
+		id, err := ledger.Save(ctx, dstRepo)
+		if err != nil {
+			return fmt.Errorf("failed to persist copy progress to destination repository: %w", err)
+		}
+		journalFiles.Insert(id)
+		return nil
+	}
+
+	if err := copyTreeBatched(ctx, srcRepo, dstRepo, selectedSnapshots, ledger,
+		dstSnapshotIDs, dstSnapshotByOriginal, persistLedger, printer); err != nil {
 		return err
+	}
+
+	// consolidate the append-only journal into a single state file. Failing to
+	// write it is fatal; failures removing obsolete files only produce warnings
+	// because their entries remain safely recorded.
+	removeWarnings, err := ledger.Compact(ctx, dstRepo, journalFiles)
+	if err != nil {
+		return err
+	}
+	for _, warning := range removeWarnings {
+		printer.E("%v", warning)
 	}
 
 	return ctx.Err()
@@ -203,10 +290,20 @@ func similarSnapshots(sna *data.Snapshot, snb *data.Snapshot) bool {
 	return true
 }
 
+// savedSnapshot records a snapshot that this run saved at the destination, so
+// it can be adopted without saving it again.
+type savedSnapshot struct {
+	targetID restic.ID
+	sn       *data.Snapshot
+}
+
 // copyTreeBatched copies multiple snapshots in one go. Snapshots are written after
 // data equivalent to at least 10 packfiles was written.
 func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRepo restic.Repository,
-	selectedSnapshots iter.Seq2[*data.Snapshot, error], printer restic.Printer) error {
+	selectedSnapshots iter.Seq2[snapshotWork, error],
+	ledger *copier.Ledger, dstSnapshotIDs restic.IDSet,
+	dstSnapshotByOriginal map[restic.ID][]*data.Snapshot,
+	persistLedger func() error, printer restic.Printer) error {
 
 	// remember already processed trees across all snapshots
 	visitedTrees := srcRepo.NewAssociatedBlobSet()
@@ -214,19 +311,22 @@ func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRep
 	targetSize := uint64(dstRepo.PackSize()) * 100
 	minDuration := 1 * time.Minute
 
+	// snapshots saved earlier in this run, indexed by the persistent Original ID
+	savedInRun := make(map[restic.ID][]savedSnapshot)
+
 	// use pull-based iterator to allow iteration in multiple steps
 	next, stop := iter.Pull2(selectedSnapshots)
 	defer stop()
 
 	for {
-		var batch []*data.Snapshot
+		var batch []snapshotWork
 		batchSize := uint64(0)
 		startTime := time.Now()
 
 		// call WithBlobUploader() once and then loop over all selectedSnapshots
 		err := dstRepo.WithBlobUploader(ctx, func(ctx context.Context, uploader restic.BlobSaverWithAsync) error {
 			for batchSize < targetSize || time.Since(startTime) < minDuration {
-				sn, err, ok := next()
+				w, err, ok := next()
 				if err != nil {
 					return err
 				}
@@ -234,11 +334,11 @@ func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRep
 					break
 				}
 
-				batch = append(batch, sn)
+				batch = append(batch, w)
 
-				printer.P("\n%v", sn)
+				printer.P("\n%v", w.sn)
 				printer.P("  copy started, this may take a while...")
-				sizeBlobs, err := copyTree(ctx, srcRepo, dstRepo, visitedTrees, *sn.Tree, printer, uploader)
+				sizeBlobs, err := copyTree(ctx, srcRepo, dstRepo, visitedTrees, *w.sn.Tree, printer, uploader)
 				if err != nil {
 					return err
 				}
@@ -257,16 +357,36 @@ func copyTreeBatched(ctx context.Context, srcRepo *repository.Repository, dstRep
 			break
 		}
 
+		// durable boundary 1: packs and the destination index are flushed now,
+		// so the snapshot data will not have to be transferred again. Record
+		// this before writing any snapshot metadata.
+		for _, w := range batch {
+			if err := ledger.Mark(*w.sn.ID(), w.original, copier.StageDataCopied, nil); err != nil {
+				return err
+			}
+		}
+		if err := persistLedger(); err != nil {
+			return err
+		}
+
 		// add a newline to separate saved snapshot messages from the other messages
 		if len(batch) > 1 {
 			printer.P("")
 		}
-		// save all the snapshots
-		for _, sn := range batch {
-			err := copySaveSnapshot(ctx, sn, dstRepo, printer)
+		// save all the snapshots and mark them complete
+		for _, w := range batch {
+			targetID, err := copySaveSnapshot(ctx, w, dstRepo, ledger, dstSnapshotIDs, dstSnapshotByOriginal,
+				savedInRun, printer)
 			if err != nil {
 				return err
 			}
+			if err := ledger.Mark(*w.sn.ID(), w.original, copier.StageComplete, &targetID); err != nil {
+				return err
+			}
+		}
+		// durable boundary 2: the snapshots are present at the destination
+		if err := persistLedger(); err != nil {
+			return err
 		}
 	}
 
@@ -348,7 +468,42 @@ func copyStats(srcRepo restic.Repository, copyBlobs restic.AssociatedBlobSet, pa
 	return sizeBlobs
 }
 
-func copySaveSnapshot(ctx context.Context, sn *data.Snapshot, dstRepo restic.Repository, printer restic.Printer) error {
+// copySaveSnapshot saves the snapshot metadata at the destination. Before
+// writing a new snapshot file it checks, in order, whether the snapshot is
+// already recorded as complete, was saved earlier in this run, or exists at the
+// destination (for example written by an older restic version or by a previous
+// interrupted run that failed between snapshot saves). An existing snapshot is
+// adopted, so snapshots are never duplicated.
+func copySaveSnapshot(ctx context.Context, w snapshotWork, dstRepo restic.Repository,
+	ledger *copier.Ledger, dstSnapshotIDs restic.IDSet,
+	dstSnapshotByOriginal map[restic.ID][]*data.Snapshot,
+	savedInRun map[restic.ID][]savedSnapshot, printer restic.Printer,
+) (restic.ID, error) {
+	sn := w.sn
+	srcID := *sn.ID()
+
+	if entry, ok := ledger.Get(srcID); ok && entry.Stage == copier.StageComplete &&
+		entry.TargetID != nil && dstSnapshotIDs.Has(*entry.TargetID) {
+		printer.V("snapshot %s already saved at destination as %s", srcID.Str(), entry.TargetID.Str())
+		return *entry.TargetID, nil
+	}
+
+	for _, saved := range savedInRun[w.original] {
+		if similarSnapshots(saved.sn, sn) {
+			printer.V("snapshot %s already saved at destination as %s", srcID.Str(), saved.targetID.Str())
+			return saved.targetID, nil
+		}
+	}
+
+	for _, existing := range dstSnapshotByOriginal[w.original] {
+		if similarSnapshots(existing, sn) {
+			printer.V("snapshot %s already present at destination as %s, adopting existing snapshot",
+				srcID.Str(), existing.ID().Str())
+			dstSnapshotIDs.Insert(*existing.ID())
+			return *existing.ID(), nil
+		}
+	}
+
 	sn.Parent = nil // Parent does not have relevance in the new repo.
 	// Use Original as a persistent snapshot ID
 	if sn.Original == nil {
@@ -356,8 +511,10 @@ func copySaveSnapshot(ctx context.Context, sn *data.Snapshot, dstRepo restic.Rep
 	}
 	newID, err := data.SaveSnapshot(ctx, dstRepo, sn)
 	if err != nil {
-		return err
+		return restic.ID{}, err
 	}
-	printer.P("snapshot %s saved, copied from source snapshot %s", newID.Str(), sn.ID().Str())
-	return nil
+	printer.P("snapshot %s saved, copied from source snapshot %s", newID.Str(), srcID.Str())
+	dstSnapshotIDs.Insert(newID)
+	savedInRun[w.original] = append(savedInRun[w.original], savedSnapshot{targetID: newID, sn: sn})
+	return newID, nil
 }

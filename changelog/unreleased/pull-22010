@@ -1,0 +1,13 @@
+Enhancement: Make `copy` resume interrupted runs using a persistent progress ledger
+
+The `copy` command now records the copy progress of each source snapshot in the
+destination repository. When a copy run was interrupted, for example due to a
+network failure, rerunning it skips snapshots that were already copied
+completely, does not transfer their data again, and only finishes the remaining
+snapshots. Snapshots created manually in the destination repository are left
+untouched. The progress records can be inspected using `restic list copy-state`.
+
+If the progress records cannot be written to the destination repository, the
+`copy` command now fails instead of continuing without progress tracking.
+
+https://github.com/restic/restic/pull/22010

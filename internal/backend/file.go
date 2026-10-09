@@ -18,6 +18,9 @@ const (
 	SnapshotFile
 	IndexFile
 	ConfigFile
+	// CopyStateFile stores per-snapshot progress of the `copy` command. New file
+	// types must be appended to keep the numeric values of existing types stable.
+	CopyStateFile
 )
 
 // Keep in sync with restic.FileType.String().
@@ -37,6 +40,8 @@ func (t FileType) String() string {
 		s = "index"
 	case ConfigFile:
 		s = "config"
+	case CopyStateFile:
+		s = "copy-state"
 	}
 	return s
 }
@@ -65,6 +70,7 @@ func (h Handle) Valid() error {
 	case SnapshotFile:
 	case IndexFile:
 	case ConfigFile:
+	case CopyStateFile:
 	default:
 		return errors.Errorf("invalid Type %d", h.Type)
 	}

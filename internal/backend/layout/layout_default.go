@@ -20,11 +20,12 @@ type DefaultLayout struct {
 }
 
 var defaultLayoutPaths = map[backend.FileType]string{
-	backend.PackFile:     "data",
-	backend.SnapshotFile: "snapshots",
-	backend.IndexFile:    "index",
-	backend.LockFile:     "locks",
-	backend.KeyFile:      "keys",
+	backend.PackFile:      "data",
+	backend.SnapshotFile:  "snapshots",
+	backend.IndexFile:     "index",
+	backend.LockFile:      "locks",
+	backend.KeyFile:       "keys",
+	backend.CopyStateFile: "copy-state",
 }
 
 func NewDefaultLayout(path string, join func(...string) string) *DefaultLayout {
