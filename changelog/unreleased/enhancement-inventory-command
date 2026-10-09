@@ -1,0 +1,12 @@
+Enhancement: Add the `inventory` command to detect removed or replaced backend objects
+
+The new `inventory` command records the objects physically present in the
+repository backend (packs, keys, snapshots and index files) in a local
+inventory file given by `--file` or `$RESTIC_INVENTORY_FILE`. On subsequent
+runs it reports objects that were removed from the backend and objects that
+were replaced (same type and ID but a different size). Objects newly added
+by concurrent backups are counted separately and are not reported as
+suspicious changes. The inventory file is only replaced atomically after
+every object type has been listed successfully, so a failed enumeration can
+never overwrite the previous baseline. The command exits with status 1 when
+removed or replaced objects were found.

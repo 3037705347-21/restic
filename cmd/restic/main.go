@@ -86,6 +86,7 @@ The full documentation can be found at https://restic.readthedocs.io/ .
 		newForgetCommand(globalOptions),
 		newGenerateCommand(globalOptions),
 		newInitCommand(globalOptions),
+		newInventoryCommand(globalOptions),
 		newKeyCommand(globalOptions),
 		newListCommand(globalOptions),
 		newLsCommand(globalOptions),
@@ -201,6 +202,8 @@ func main() {
 		exitMessage = fmt.Sprintf("%v\nthe `unlock` command can be used to remove stale locks", err)
 	case err == ErrInvalidSourceData:
 		exitMessage = fmt.Sprintf("Warning: %v", err)
+	case errors.Is(err, ErrInventoryDrift):
+		exitMessage = err.Error()
 	case errors.IsFatal(err):
 		exitMessage = err.Error()
 	case errors.Is(err, repository.ErrNoKeyFound):
