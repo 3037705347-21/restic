@@ -12,6 +12,7 @@ const (
 	ExplicitS3AnonymousAuth FlagName = "explicit-s3-anonymous-auth"
 	SafeForgetKeepTags      FlagName = "safe-forget-keep-tags"
 	S3Restore               FlagName = "s3-restore"
+	VerificationLedger      FlagName = "verification-ledger"
 )
 
 func init() {
@@ -23,5 +24,6 @@ func init() {
 		ExplicitS3AnonymousAuth: {Type: Stable, Description: "forbid anonymous S3 authentication unless `-o s3.unsafe-anonymous-auth=true` is set"},
 		SafeForgetKeepTags:      {Type: Stable, Description: "prevent deleting all snapshots if the tag passed to `forget --keep-tags tagname` does not exist"},
 		S3Restore:               {Type: Alpha, Description: "restore S3 objects from cold storage classes when `-o s3.enable-restore=true` is set"},
+		VerificationLedger:      {Type: Alpha, Description: "persist resumable `check --read-data` progress and quarantine records in a local ledger, consumed by `repair packs --from-ledger`"},
 	})
 }

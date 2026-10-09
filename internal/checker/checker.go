@@ -301,10 +301,10 @@ func (c *Checker) UnusedBlobs(ctx context.Context) (blobs restic.BlobHandles, er
 // with an unmodified parameter list
 // Otherwise it calculates the packfiles needed, gets their sizes from the full
 // packfile set and submits them to repository.ReadPacks()
-func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID]int64) map[restic.ID]int64, printer restic.Printer, errChan chan<- error) {
+func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID]int64) map[restic.ID]int64, printer restic.Printer, errChan chan<- error, hook func(repository.PackCheckResult) error) {
 	// no snapshot filtering, pass through
 	if !c.IsFiltered() {
-		c.Checker.ReadPacks(ctx, filter, printer, errChan)
+		c.Checker.ReadPacks(ctx, filter, printer, errChan, hook)
 		return
 	}
 
@@ -323,5 +323,5 @@ func (c *Checker) ReadPacks(ctx context.Context, filter func(packs map[restic.ID
 		return filter(filteredPacks)
 	}
 
-	c.Checker.ReadPacks(ctx, packfileFilter, printer, errChan)
+	c.Checker.ReadPacks(ctx, packfileFilter, printer, errChan, hook)
 }

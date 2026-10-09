@@ -17,7 +17,9 @@ import (
 	"github.com/restic/restic/internal/checker"
 	"github.com/restic/restic/internal/data"
 	"github.com/restic/restic/internal/errors"
+	"github.com/restic/restic/internal/feature"
 	"github.com/restic/restic/internal/global"
+	"github.com/restic/restic/internal/ledger"
 	"github.com/restic/restic/internal/repository"
 	"github.com/restic/restic/internal/restic"
 	"github.com/restic/restic/internal/ui"
@@ -39,6 +41,15 @@ backed-up data, use the --read-data or --read-data-subset flags.
 
 By default, check creates a new temporary cache directory to verify data.
 To reuse the existing cache, use the --with-cache flag.
+
+With the experimental --resume flag (needs --feature-flags=verification-ledger=true)
+the --read-data verification is persisted in a local verification ledger. Packs
+already verified are skipped on later runs; a pack is read again when its index
+entries change, and packs removed from the index are forgotten. Damaged packs
+and the still-readable blobs within them are recorded for "restic repair packs
+--from-ledger". The ledger lives in the persistent cache directory (use
+--ledger-dir to override); deleting it only causes the next run to read every
+pack again.
 
 EXIT STATUS
 ===========
@@ -77,12 +88,16 @@ type CheckOptions struct {
 	ReadDataSubset string
 	CheckUnused    bool
 	WithCache      bool
-	data.SnapshotFilter
+	Resume         bool
+	LedgerDir      string
+	SnapshotFilter data.SnapshotFilter
 }
 
 func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 	f.BoolVar(&opts.ReadData, "read-data", false, "read all data blobs")
 	f.StringVar(&opts.ReadDataSubset, "read-data-subset", "", "read a `subset` of data packs, specified as 'n/t' for specific part, or either 'x%' or 'x.y%' or a size in bytes with suffixes k/K, m/M, g/G, t/T for a random subset")
+	f.BoolVar(&opts.Resume, "resume", false, "resume a persistent data verification: skip packs already verified since their index entries last changed; damaged packs and salvageable blobs are recorded for `repair packs --from-ledger`")
+	f.StringVar(&opts.LedgerDir, "ledger-dir", "", "use `dir` as the verification ledger location instead of the persistent cache directory")
 	var ignored bool
 	f.BoolVar(&ignored, "check-unused", false, "find unused blobs")
 	err := f.MarkDeprecated("check-unused", "`--check-unused` is deprecated and will be ignored")
@@ -97,6 +112,14 @@ func (opts *CheckOptions) AddFlags(f *pflag.FlagSet) {
 func checkFlags(opts CheckOptions) error {
 	if opts.ReadData && opts.ReadDataSubset != "" {
 		return errors.Fatal("check flags --read-data and --read-data-subset cannot be used together")
+	}
+	if opts.Resume {
+		if !feature.Flag.Enabled(feature.VerificationLedger) {
+			return errors.Fatal("the verification ledger is experimental: enable it with --feature-flags=verification-ledger=true")
+		}
+		if !opts.ReadData && opts.ReadDataSubset == "" {
+			return errors.Fatal("--resume only takes effect together with --read-data or --read-data-subset")
+		}
 	}
 	if opts.ReadDataSubset != "" {
 		dataSubset, err := stringToIntSlice(opts.ReadDataSubset)
@@ -236,6 +259,10 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		printer = newJSONErrorPrinter(term)
 	}
 
+	// resolve the persistent cache base before check switches to a temporary
+	// cache directory; the verification ledger must survive that cleanup
+	cacheBase := persistentCacheBase(gopts)
+
 	cleanup := prepareCheckCache(opts, &gopts, printer)
 	defer cleanup()
 
@@ -300,6 +327,37 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 		return summary, errors.Fatal("repository contains errors")
 	}
 
+	// open the persistent verification ledger before the pack metadata phase,
+	// which already registers missing/truncated packs
+	var verifier *checkLedger
+	ledgerFinished := false
+	if opts.Resume {
+		dir, err := resolveLedgerDir(opts.LedgerDir, cacheBase, repo.Config().ID)
+		if err != nil {
+			return summary, err
+		}
+		store, err := openLedgerStore(dir)
+		if err != nil {
+			return summary, err
+		}
+		fingerprints, err := chkr.PackFingerprints(ctx)
+		if err != nil {
+			_ = store.Close()
+			return summary, err
+		}
+		verifier, err = newCheckLedger(store, fingerprints)
+		if err != nil {
+			_ = store.Close()
+			return summary, err
+		}
+		// always flush and release the ledger, even on early error returns
+		defer func() {
+			if !ledgerFinished {
+				_ = verifier.finish()
+			}
+		}()
+	}
+
 	orphanedPacks := 0
 	errChan := make(chan error)
 
@@ -315,6 +373,15 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 			} else {
 				if packErr.Truncated || packErr.Missing {
 					salvagePacks.Insert(packErr.ID)
+					if verifier != nil {
+						reason := ledger.ReasonTruncatedPack
+						if packErr.Missing {
+							reason = ledger.ReasonMissingPack
+						}
+						if lerr := verifier.registerMetadata(packErr.ID, reason); lerr != nil {
+							return summary, fmt.Errorf("verification ledger: %w", lerr)
+						}
+					}
 				}
 				errorsFound = true
 				summary.NumErrors++
@@ -394,7 +461,13 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 	if readDataFilter != nil {
 		errChan := make(chan error)
 
-		go chkr.ReadPacks(ctx, readDataFilter, printer, errChan)
+		var hook func(repository.PackCheckResult) error
+		if verifier != nil {
+			readDataFilter = verifier.pendingFilter(printer, readDataFilter)
+			hook = verifier.hook
+		}
+
+		go chkr.ReadPacks(ctx, readDataFilter, printer, errChan, hook)
 
 		for err := range errChan {
 			errorsFound = true
@@ -404,6 +477,30 @@ func runCheck(ctx context.Context, opts CheckOptions, gopts global.Options, args
 				salvagePacks.Insert(err.PackID)
 			}
 		}
+	}
+
+	// finalize the ledger: merge quarantined packs (including those found by
+	// earlier runs) into the repair guidance and persist the run's results
+	if verifier != nil {
+		read, skipped, _, quarantineTotal, ledgerPath := verifier.counts()
+		summary.PacksRead = read
+		summary.PacksSkipped = skipped
+		summary.QuarantinedPacks = quarantineTotal
+		summary.LedgerPath = ledgerPath
+
+		for id := range verifier.quarantineIDs() {
+			salvagePacks.Insert(id)
+		}
+		if len(salvagePacks) > 0 {
+			// quarantined damage keeps the exit status non-zero even when the
+			// current run did not encounter new errors
+			errorsFound = true
+		}
+		if err := verifier.finish(); err != nil {
+			ledgerFinished = true
+			return summary, fmt.Errorf("verification ledger could not be persisted: %w", err)
+		}
+		ledgerFinished = true
 	}
 
 	if len(salvagePacks) > 0 {
@@ -538,11 +635,15 @@ func selectRandomPacksByFileSize(allPacks map[restic.ID]int64, subsetSize int64,
 }
 
 type checkSummary struct {
-	MessageType     string   `json:"message_type"` // "summary"
-	NumErrors       int      `json:"num_errors"`
-	BrokenPacks     []string `json:"broken_packs"`         // run "restic repair packs ID..." and "restic repair snapshots --forget" to remove damaged files
-	HintRepairIndex bool     `json:"suggest_repair_index"` // run "restic repair index"
-	HintPrune       bool     `json:"suggest_prune"`        // run "restic prune"
+	MessageType      string   `json:"message_type"` // "summary"
+	NumErrors        int      `json:"num_errors"`
+	BrokenPacks      []string `json:"broken_packs"`         // run "restic repair packs ID..." and "restic repair snapshots --forget" to remove damaged files
+	HintRepairIndex  bool     `json:"suggest_repair_index"` // run "restic repair index"
+	HintPrune        bool     `json:"suggest_prune"`        // run "restic prune"
+	PacksRead        int64    `json:"packs_read,omitempty"`
+	PacksSkipped     int64    `json:"packs_skipped,omitempty"`
+	QuarantinedPacks int      `json:"quarantined_packs,omitempty"`
+	LedgerPath       string   `json:"ledger_path,omitempty"`
 }
 
 type checkError struct {

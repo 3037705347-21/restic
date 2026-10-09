@@ -15,8 +15,13 @@ import (
 
 // testRunRepairPacks runs `restic repair packs` with capturing stdout and stderr
 func testRunRepairPacks(t testing.TB, gopts global.Options, args []string) (string, string, error) {
+	return testRunRepairPacksOpts(t, gopts, RepairPacksOptions{}, args)
+}
+
+// testRunRepairPacksOpts runs `restic repair packs` with the given options.
+func testRunRepairPacksOpts(t testing.TB, gopts global.Options, opts RepairPacksOptions, args []string) (string, string, error) {
 	bufStdout, bufStderr, err := withCaptureStdoutStderr(t, gopts, func(ctx context.Context, gopts global.Options) error {
-		return runRepairPacks(ctx, gopts, gopts.Term, args)
+		return runRepairPacks(ctx, gopts, opts, gopts.Term, args)
 	})
 
 	return bufStdout.String(), bufStderr.String(), err
